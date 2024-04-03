@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
 const { format } = require("date-fns");
 const SubCenterStaff = require("../models/scStaff");
 const PatientDetails = require("../models/PatientDetails");
@@ -116,13 +117,13 @@ const login = async (req, res) => {
     }
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "8h",
+      expiresIn: "10h",
     });
 
     res
       .status(200)
       .cookie("token", token)
-      .json({ message: "Login successful" });
+      .json({ message: "Login successful", token });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Internal Server Error" });
@@ -163,7 +164,7 @@ const logout = (req, res) => {
     .json({ message: "Logout successful" });
 };
 
-//EditProfile
+// EditProfile
 const editProfile = async (req, res) => {
   try {
     const { userId } = req.user;
@@ -259,13 +260,16 @@ const PatientEntry = async (req, res) => {
   try {
     const {
       firstName,
+      lastName,
       age,
       gender,
+      isCovid19Positive,
       phoneNumber,
       aadharID,
+      diagnosis,
+      treatment,
+      otherInfo,
       treatedBy,
-      phcName,
-      subCenter,
     } = req.body;
 
     if (
@@ -273,10 +277,11 @@ const PatientEntry = async (req, res) => {
       !age ||
       !gender ||
       !phoneNumber ||
-      !aadharID ||
       !treatedBy ||
-      !phcName ||
-      !subCenter
+      !treatedBy.staffName ||
+      !treatedBy.staffID ||
+      !treatedBy.phcName ||
+      !treatedBy.subCenter
     ) {
       return res
         .status(400)
@@ -289,43 +294,45 @@ const PatientEntry = async (req, res) => {
           "Invalid phoneNumber format. Please provide exactly 10 digits.",
       });
     }
-
-    if (!/^\d{12}$/.test(aadharID)) {
+    if (aadharID && !/^\d{12}$/.test(aadharID)) {
       return res.status(400).json({
         message: "Invalid AadharID format. Please provide exactly 12 digits.",
       });
     }
 
     const existingPatientPhone = await PatientDetails.findOne({ phoneNumber });
-
     if (existingPatientPhone) {
       return res
         .status(400)
         .json({ message: "Patient with this phoneNumber already exists" });
     }
 
-    const existingPatientAadhar = await PatientDetails.findOne({ aadharID });
-
-    if (existingPatientAadhar) {
-      return res
-        .status(400)
-        .json({ message: "Patient with this AadharID already exists" });
+    if (aadharID) {
+      const existingPatientAadhar = await PatientDetails.findOne({ aadharID });
+      if (existingPatientAadhar) {
+        return res
+          .status(400)
+          .json({ message: "Patient with this AadharID already exists" });
+      }
     }
 
     const newPatient = new PatientDetails({
       firstName,
-      lastName: req.body.lastName || "",
+      lastName: lastName || "",
       age,
       gender,
-      isCovid19Positive: req.body.isCovid19Positive || false,
+      isCovid19Positive: isCovid19Positive || false,
       phoneNumber,
-      aadharID,
-      diagnosis: req.body.diagnosis || "",
-      treatment: req.body.treatment || "",
-      otherInfo: req.body.otherInfo || "",
-      treatedBy,
-      phcName,
-      subCenter,
+      aadharID: aadharID || "",
+      diagnosis: diagnosis || "",
+      treatment: treatment || "",
+      otherInfo: otherInfo || "",
+      treatedBy: {
+        staffName: treatedBy.staffName,
+        staffID: treatedBy.staffID,
+        phcName: treatedBy.phcName,
+        subCenter: treatedBy.subCenter,
+      },
     });
 
     const savedPatient = await newPatient.save();
@@ -360,7 +367,9 @@ const PatientEntry = async (req, res) => {
 // Get PatientDetails
 const getPatientDetails = async (req, res) => {
   try {
-    const allPatients = await PatientDetails.find().sort({ date: -1 });
+    const allPatients = await PatientDetails.find()
+      .sort({ createdAt: -1 }) // Sort by createdAt field in descending order
+      .exec();
 
     if (!allPatients || allPatients.length === 0) {
       return res.status(404).json({ message: "No patients found" });
@@ -416,25 +425,26 @@ const editPatientDetailsById = async (req, res) => {
     if (!patientId) {
       return res.status(400).json({ message: "Invalid update request." });
     }
-    const existingPhoneNumberPatient = await PatientDetails.findOne({
-      phoneNumber,
-      _id: { $ne: patientId },
-    });
+    
+    const existingPatient = await PatientDetails.findById(patientId);
 
-    if (existingPhoneNumberPatient) {
-      return res.status(400).json({
-        message:
-          "Phone Number already exists, try updating with a different Number.",
-      });
+    if (!existingPatient) {
+      return res.status(404).json({ message: "Patient not found." });
     }
-    const existingAadharIDPatient = await PatientDetails.findOne({
-      aadharID,
-      _id: { $ne: patientId },
-    });
 
-    if (existingAadharIDPatient) {
-      return res.status(400).json({
-        message: "Aadhar ID already exists, please provide a unique Aadhar ID.",
+    const lastModifiedTimestamp = existingPatient.updatedAt
+      ? existingPatient.updatedAt.getTime()
+      : 0;
+
+    const currentTime = new Date().getTime();
+    const minutesDifference = Math.floor(
+      (currentTime - lastModifiedTimestamp) / (1000 * 60)
+    );
+
+    if (minutesDifference > 60) {
+      return res.status(403).json({
+        message:
+          "You can only edit patient details within 1 hour from the last modification time.",
       });
     }
 
@@ -469,58 +479,53 @@ const editPatientDetailsById = async (req, res) => {
   }
 };
 
-//Delete Patient Details
 const deletePatientById = async (req, res) => {
   try {
     const patientId = req.params.id;
 
     if (!patientId) {
-      // Validation: Checking if the patient ID is provided
       return res.status(400).json({
         message: "Invalid delete request. Please provide a patient ID.",
       });
     }
 
-    const existingPatient = await PatientDetails.findById(patientId); // Finding the patient by ID
+    const existingPatient = await PatientDetails.findById(patientId);
 
     if (!existingPatient) {
-      // Validation: Checking if the patient exists
       return res.status(404).json({ message: "Patient not found." });
     }
 
-    const creationTimestamp = parseInt(patientId.substring(0, 8), 16) * 1000; // Extracting creation timestamp from ObjectID
-    const currentTime = new Date().getTime(); // Current timestamp
+    // Check if the resource was created within the last 48 hours
+    const creationTimestamp = parseInt(patientId.substring(0, 8), 16) * 1000;
+    const currentTime = new Date().getTime();
     const hoursDifference = Math.floor(
       (currentTime - creationTimestamp) / (1000 * 60 * 60)
-    ); // Calculating time difference in hours
+    );
 
-    if (hoursDifference > 48) {
-      // Validation: Checking if patient entry is older than 48 hours
+    if (hoursDifference > 1) {
       return res.status(403).json({
         message:
-          "You can only delete patients within 48 hours from the creation time.",
+          "You can only delete patients within 1 hour from the creation time.",
       });
     }
 
-    const deletedPatient = await PatientDetails.findByIdAndDelete(patientId); // Deleting the patient
+    const deletedPatient = await PatientDetails.findByIdAndDelete(patientId);
 
     res.status(200).json({
-      // Sending success response
       message: "Patient deleted successfully",
       patient: deletedPatient,
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Internal Server Error" }); // Error response
+    res.status(500).json({ message: "Internal Server Error" });
   }
 };
 
-module.exports = deletePatientById; // Exporting the deletePatientById function
 
-// Patient Revist
+//POST Patient Revist
 const revisits = async (req, res) => {
   try {
-    const { phoneNumber, treatedBy, phcName, subCenter } = req.body;
+    const { phoneNumber, treatedBy } = req.body;
 
     if (!/^\d{10}$/.test(phoneNumber)) {
       return res.status(400).json({
@@ -530,7 +535,6 @@ const revisits = async (req, res) => {
     }
 
     const existingPatient = await PatientDetails.findOne({ phoneNumber });
-
     if (!existingPatient) {
       return res.status(404).json({
         message:
@@ -544,9 +548,12 @@ const revisits = async (req, res) => {
       diagnosis: diagnosis || "",
       treatment: treatment || "",
       otherInfo: otherInfo || "",
-      treatedBy: treatedBy || "",
-      phcName: phcName || "",
-      subCenter: subCenter || "",
+      treatedBy: {
+        phcName: treatedBy.phcName || "",
+        subCenter: treatedBy.subCenter || "",
+        staffName: treatedBy.staffName || "",
+        staffID: treatedBy.staffID || null,
+      },
     });
 
     const updatedPatient = await existingPatient.save();
@@ -974,7 +981,7 @@ const getLocationCoordinates = async (req, res) => {
 // Mark login attendance
 const loginAttendance = async (req, res) => {
   const staffId = req.params.staffId;
-  const { password } = req.body;
+  const { password, latitude, longitude } = req.body;
 
   try {
     const ObjectId = require("mongoose").Types.ObjectId;
@@ -1008,6 +1015,7 @@ const loginAttendance = async (req, res) => {
       attendanceDate: todayDate,
       loginTime: format(new Date(), "HH:mm:ss"),
       status: "Present",
+      location: { latitude, longitude },
     });
 
     await staff.save();
@@ -1030,6 +1038,7 @@ const logoutAttendance = async (req, res) => {
     if (!staff) {
       return res.status(404).json({ message: "Staff not found" });
     }
+
     const passwordMatch = await comparePassword(password, staff.password);
     if (!passwordMatch) {
       return res.status(401).json({ message: "Invalid password" });
@@ -1052,7 +1061,7 @@ const logoutAttendance = async (req, res) => {
     }
 
     loginAttendanceToday.logoutTime = format(new Date(), "HH:mm:ss");
-    loginAttendanceToday.workHours = JSON.parse(workHours);
+    loginAttendanceToday.workHours = workHours; // No need to parse workHours, it's already an object
     await staff.save();
 
     return res.status(200).json({ message: "You have logged out" });
@@ -1109,6 +1118,28 @@ const getAttendance = async (req, res) => {
   }
 };
 
+//GET Staff Attendnace Count
+const getAttendanceCount = async (req, res) => {
+  const staffId = req.params.staffId;
+
+  try {
+    const staff = await SubCenterStaff.findById(staffId);
+
+    if (!staff) {
+      return res.status(404).json({ message: "Staff not found" });
+    }
+
+    const presentDaysCount = staff.attendance.filter(
+      (record) => record.status === "Present"
+    ).length;
+
+    res.status(200).json({ presentDaysCount });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
 //Get Patient Yearly Data
 const getYearlyPatientData = async (req, res) => {
   try {
@@ -1118,34 +1149,24 @@ const getYearlyPatientData = async (req, res) => {
       return res.status(404).json({ message: "No patients found" });
     }
 
-    // Initialize treatment counts for each month of the year
     const treatmentCounts = Array(12).fill(0);
 
-    // Iterate through all patients
     allPatients.forEach((patient) => {
-      // Extract year from the patient's date
       const year = parseInt(patient.date.split("-")[2]);
-      // Check if the patient's date matches the requested year
       if (year === parseInt(req.params.year)) {
-        // Extract month from the patient's date
         const monthIndex = parseInt(patient.date.split("-")[1]) - 1;
-        // Increment treatment count for the corresponding month
         treatmentCounts[monthIndex]++;
-        // Iterate through revisits
         patient.revisits.forEach((revisit) => {
-          // Extract year and month from the revisit's date
           const revisitYear = parseInt(revisit.date.split("-")[2]);
           const revisitMonthIndex = parseInt(revisit.date.split("-")[1]) - 1;
-          // Check if the revisit's date matches the requested year
+
           if (revisitYear === parseInt(req.params.year)) {
-            // Increment treatment count for the corresponding month
             treatmentCounts[revisitMonthIndex]++;
           }
         });
       }
     });
 
-    // Prepare response data
     const responseData = {
       year: req.params.year,
       treatmentCounts: treatmentCounts,
@@ -1158,21 +1179,54 @@ const getYearlyPatientData = async (req, res) => {
   }
 };
 
-// Helper function to extract year from date
-const extractYearFromDate = (dateString) => {
-  const [day, month, year] = dateString.split("-");
-  return year;
+//Total patientEntries by Staff
+const getStaffEntries = async (req, res) => {
+  try {
+    const staffEntries = await PatientDetails.aggregate([
+      { $unwind: "$treatedBy" },
+      {
+        $group: {
+          _id: "$treatedBy.staffID",
+          staffName: { $first: "$treatedBy.staffName" },
+          patientCount: { $sum: 1 },
+        },
+      },
+    ]);
+
+    res.status(200).json({
+      message: "Staff entries retrieved successfully",
+      staffEntries,
+    });
+  } catch (error) {
+    console.error("Error retrieving staff entries:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
 };
 
-// Helper function to count MongoDB IDs per year
-const countMongoDBIds = (id, year, yearlyTreatmentCount) => {
-  if (!yearlyTreatmentCount[year]) {
-    yearlyTreatmentCount[year] = {};
-  }
-  if (!yearlyTreatmentCount[year][id]) {
-    yearlyTreatmentCount[year][id] = 1;
-  } else {
-    yearlyTreatmentCount[year][id]++;
+//Total patientEntries by StaffID
+const getStaffEntriesById = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+
+    const staffEntries = await PatientDetails.aggregate([
+      { $unwind: "$treatedBy" },
+      { $match: { "treatedBy.staffID": staffId } },
+      {
+        $group: {
+          _id: "$treatedBy.staffID",
+          staffName: { $first: "$treatedBy.staffName" },
+          patientCount: { $sum: 1 },
+        },
+      },
+    ]);
+
+    res.status(200).json({
+      message: "Staff entries retrieved successfully",
+      staffEntries,
+    });
+  } catch (error) {
+    console.error("Error retrieving staff entries by ID:", error);
+    res.status(500).json({ message: "Internal Server Error" });
   }
 };
 
@@ -1205,6 +1259,9 @@ module.exports = {
   logoutAttendance,
   logoutAttendance,
   getAttendance,
+  getAttendanceCount,
   leaveRequest,
   getYearlyPatientData,
+  getStaffEntries,
+  getStaffEntriesById,
 };

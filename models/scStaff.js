@@ -115,6 +115,6 @@ const staffSchema = new Schema({
   },
 });
 
-const SubCenterStaff = mongoose.model("SubCenterStaff", staffSchema);
+const SubCenterStaff = mongoose.model("Staffs", staffSchema);
 
 module.exports = SubCenterStaff;
